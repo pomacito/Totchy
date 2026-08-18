@@ -1,0 +1,14 @@
+DejaVu Sans (Regular, Bold) — bundled for Cyrillic (Ukrainian) text support in
+generated PDF reports (@react-pdf/renderer requires embedded font files with
+the required glyphs; no system font access is available in generated PDFs
+without explicit embedding).
+
+Source: https://dejavu-fonts.github.io/
+License: Bitstream Vera License + Public Domain (DejaVu changes).
+See: https://dejavu-fonts.github.io/License.html
+
+Copyright (c) 2003 by Bitstream, Inc. All Rights Reserved. Bitstream Vera is
+a trademark of Bitstream, Inc. DejaVu changes are in the public domain.
+Permission is granted to reproduce and distribute the font software under
+the conditions in the Bitstream Vera License (permissive, allows
+redistribution; renaming required only if the font itself is modified).

@@ -1,0 +1,369 @@
+// Схема даних системи «Статус території».
+// Модель побудована як append-only / effective-dated: історичні записи
+// ніколи не перезаписуються, кожна редакція джерела зберігається окремо.
+// Див. docs/ERD.md для пояснення рішень.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Довідники та нормативна база
+// ---------------------------------------------------------------------------
+
+enum LegalActType {
+  RESOLUTION // постанова
+  ORDER // наказ
+  LAW // закон
+  DECREE // указ
+  OTHER
+}
+
+enum LegalActStatus {
+  DRAFT
+  ACTIVE
+  SUPERSEDED
+  REPEALED
+}
+
+model LegalAct {
+  id             String         @id @default(cuid())
+  type           LegalActType
+  issuingBody    String // орган, що ухвалив акт
+  number         String // номер акта
+  title          String // повна офіційна назва
+  adoptedAt      DateTime // дата ухвалення
+  effectiveAt    DateTime // дата набрання чинності
+  officialUrl    String // посилання на офіційний текст
+  documentSha256 String? // контрольна сума завантаженого документа
+  status         LegalActStatus @default(ACTIVE)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  sourceVersions        SourceVersion[]
+  statusRecords         TerritoryStatusRecord[]
+  changelogEntriesAdded ChangelogEntry[]
+
+  @@unique([type, number, adoptedAt])
+  @@index([status])
+}
+
+enum SourceVersionStatus {
+  IMPORTED // сирі дані завантажено
+  VALIDATING
+  VALIDATED
+  REJECTED
+  PUBLISHED
+  ROLLED_BACK
+}
+
+/// Одна редакція джерела (наприклад, чергова редакція Переліку територій).
+/// Публікація нової версії ніколи не видаляє попередні.
+model SourceVersion {
+  id            String               @id @default(cuid())
+  label         String // людський ідентифікатор версії, напр. "2026-06-24"
+  legalActId    String
+  legalAct      LegalAct             @relation(fields: [legalActId], references: [id])
+  retrievedAt   DateTime // коли документ було отримано/завантажено
+  status        SourceVersionStatus  @default(IMPORTED)
+  publishedAt   DateTime?
+  supersedesId  String?              @unique
+  supersedes    SourceVersion?       @relation("VersionChain", fields: [supersedesId], references: [id])
+  supersededBy  SourceVersion?       @relation("VersionChain")
+  isDemoData    Boolean              @default(false) // демонстраційна редакція (не офіційні дані)
+  rawFileKey    String? // ключ у object storage до первинного файлу
+  notes         String?
+  createdAt     DateTime             @default(now())
+
+  importJobs     ImportJob[]
+  statusRecords  TerritoryStatusRecord[]
+  changelog      ChangelogEntry[]
+
+  @@index([status])
+  @@index([isDemoData])
+}
+
+/// Контрольований довідник офіційних категорій статусу території.
+/// Формулювання (`officialLabel`) відтворює текст нормативного акта дослівно
+/// і не підлягає довільному скороченню в жодному місці інтерфейсу.
+model StatusCategory {
+  id            String   @id @default(cuid())
+  code          String   @unique // машинний код, напр. TEMPORARILY_OCCUPIED
+  officialLabel String // точне формулювання з Переліку
+  shortLabel    String // коротка назва для чіпів/бейджів (без спотворення змісту)
+  description   String // пояснення простою мовою для картки/методології
+  priority      Int // пріоритет при конфлікті кількох чинних категорій одного рівня
+  colorToken    String // семантичний токен кольору теми (не єдиний носій сенсу — див. UI)
+  createdAt     DateTime @default(now())
+
+  statusRecords TerritoryStatusRecord[]
+}
+
+// ---------------------------------------------------------------------------
+// Адміністративно-територіальний устрій (КАТОТТГ)
+// ---------------------------------------------------------------------------
+
+enum TerritorialUnitType {
+  AR_CRIMEA
+  OBLAST
+  RAION
+  HROMADA
+  CITY
+  TOWN
+  VILLAGE
+  URBAN_SETTLEMENT
+  CITY_DISTRICT
+}
+
+/// Одиниця адміністративно-територіального устрою. Перейменування та зміни
+/// належності не змінюють існуючий рядок — створюється новий запис з
+/// власним періодом дії (`validFrom`/`validTo`), а старий закривається.
+model TerritorialUnit {
+  id         String              @id @default(cuid())
+  katottg    String // код КАТОТТГ (структура спрощена/демо — див. docs)
+  name       String // офіційна поточна назва
+  type       TerritorialUnitType
+  parentId   String?
+  parent     TerritorialUnit?    @relation("Hierarchy", fields: [parentId], references: [id])
+  children   TerritorialUnit[]   @relation("Hierarchy")
+  validFrom  DateTime
+  validTo    DateTime?
+  isDemoData Boolean             @default(false)
+  createdAt  DateTime            @default(now())
+
+  names         SettlementName[]
+  statusRecords TerritoryStatusRecord[]
+
+  @@index([katottg])
+  @@index([type])
+  @@index([parentId])
+}
+
+enum NameType {
+  OFFICIAL
+  FORMER
+  ALTERNATIVE
+  TRANSLITERATION
+}
+
+model SettlementName {
+  id                 String           @id @default(cuid())
+  territorialUnitId  String
+  territorialUnit    TerritorialUnit  @relation(fields: [territorialUnitId], references: [id])
+  name               String
+  nameNormalized     String // нормалізована форма для пошуку (без діакритики/регістру)
+  type               NameType
+  validFrom          DateTime?
+  validTo            DateTime?
+  createdAt          DateTime         @default(now())
+
+  @@index([territorialUnitId])
+  @@index([nameNormalized])
+}
+
+// ---------------------------------------------------------------------------
+// Записи правового статусу (temporal)
+// ---------------------------------------------------------------------------
+
+enum RecordLevel {
+  SETTLEMENT
+  HROMADA
+  RAION
+  OBLAST
+}
+
+/// Запис Переліку, прив'язаний до конкретної редакції джерела. Записи різних
+/// редакцій співіснують — нова редакція не видаляє й не змінює попередні.
+model TerritoryStatusRecord {
+  id                  String          @id @default(cuid())
+  territorialUnitId   String
+  territorialUnit     TerritorialUnit @relation(fields: [territorialUnitId], references: [id])
+  statusCategoryId    String
+  statusCategory      StatusCategory  @relation(fields: [statusCategoryId], references: [id])
+  recordLevel         RecordLevel
+  startDate           DateTime
+  endDate             DateTime?
+  sourceVersionId     String
+  sourceVersion       SourceVersion   @relation(fields: [sourceVersionId], references: [id])
+  legalActId          String
+  legalAct            LegalAct        @relation(fields: [legalActId], references: [id])
+  sourceExcerpt        String? // точний фрагмент запису з таблиці джерела
+  sourceRowRef         String? // структуроване посилання на рядок/пункт джерела
+  needsReview          Boolean         @default(false)
+  reviewReason         String?
+  createdAt            DateTime        @default(now())
+
+  @@index([territorialUnitId, startDate])
+  @@index([sourceVersionId])
+  @@index([needsReview])
+}
+
+// ---------------------------------------------------------------------------
+// ETL / імпорт та валідація
+// ---------------------------------------------------------------------------
+
+enum ImportJobStatus {
+  PENDING
+  FETCHING
+  PARSING
+  VALIDATING
+  AWAITING_REVIEW
+  PUBLISHED
+  REJECTED
+  ROLLED_BACK
+  FAILED
+}
+
+model ImportJob {
+  id              String          @id @default(cuid())
+  sourceVersionId String
+  sourceVersion   SourceVersion   @relation(fields: [sourceVersionId], references: [id])
+  status          ImportJobStatus @default(PENDING)
+  startedAt       DateTime        @default(now())
+  finishedAt      DateTime?
+  triggeredBy     String? // userId або "system"
+  log             String? // журнал трансформацій (append-only текст/JSON)
+  recordsTotal    Int?
+  recordsChanged  Int?
+  recordsFlagged  Int?
+
+  validationIssues ValidationIssue[]
+
+  @@index([status])
+}
+
+enum ValidationSeverity {
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+}
+
+model ValidationIssue {
+  id          String             @id @default(cuid())
+  importJobId String
+  importJob   ImportJob          @relation(fields: [importJobId], references: [id])
+  severity    ValidationSeverity
+  code        String // машинний код правила валідації
+  message     String
+  entityRef   String? // ідентифікатор пов'язаного запису/рядка джерела
+  resolved    Boolean            @default(false)
+  resolvedBy  String?
+  resolvedAt  DateTime?
+  createdAt   DateTime           @default(now())
+
+  @@index([importJobId])
+  @@index([severity])
+}
+
+/// Публічний журнал змін між редакціями (розраховується при публікації).
+model ChangelogEntry {
+  id              String        @id @default(cuid())
+  sourceVersionId String
+  sourceVersion   SourceVersion @relation(fields: [sourceVersionId], references: [id])
+  legalActId      String
+  legalAct        LegalAct      @relation(fields: [legalActId], references: [id])
+  changeType      String // ADDED | REMOVED | DATE_CHANGED | CATEGORY_CHANGED | RENAMED | RECODED
+  territorialUnitRef String // katottg або людський опис одиниці
+  description     String
+  createdAt       DateTime      @default(now())
+
+  @@index([sourceVersionId])
+}
+
+// ---------------------------------------------------------------------------
+// Користувачі, аудит, звіти, підписки
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  EDITOR
+  LEGAL_VERIFIER
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  displayName  String
+  role         UserRole
+  passwordHash String
+  createdAt    DateTime @default(now())
+  lastLoginAt  DateTime?
+
+  auditLogEntries AuditLog[]
+  reportJobs      ReportJob[]
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String // напр. "IMPORT_PUBLISH", "VALIDATION_RERUN"
+  entityType String
+  entityId   String
+  beforeJson String?
+  afterJson  String?
+  comment    String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([userId])
+}
+
+enum ReportType {
+  SINGLE_TERRITORY
+  COMPARISON
+  REGIONAL
+  VERSION_DIFF
+  ANALYTICS_PERIOD
+  UPDATE_LOG
+}
+
+enum ReportFormat {
+  PDF
+  XLSX
+  CSV
+  HTML
+}
+
+enum ReportJobStatus {
+  QUEUED
+  PROCESSING
+  READY
+  FAILED
+}
+
+model ReportJob {
+  id          String          @id @default(cuid())
+  type        ReportType
+  format      ReportFormat
+  paramsJson  String
+  status      ReportJobStatus @default(QUEUED)
+  requestedBy String?
+  requester   User?           @relation(fields: [requestedBy], references: [id])
+  resultKey   String? // ключ у object storage до готового файлу
+  verifyToken String          @unique @default(cuid()) // для перевірки автентичності звіту за стабільним URL
+  createdAt   DateTime        @default(now())
+  finishedAt  DateTime?
+  error       String?
+
+  @@index([status])
+}
+
+/// Модель підписок закладена для сумісності (реалізація UI/доставки —
+/// друга черга, поза межами цього MVP).
+model Subscription {
+  id                String   @id @default(cuid())
+  email             String
+  territorialUnitId String?
+  createdAt         DateTime @default(now())
+  confirmedAt       DateTime?
+  unsubscribedAt    DateTime?
+
+  @@index([territorialUnitId])
+}

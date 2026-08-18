@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Немає з'єднання — Статус території</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #FBFAF8; color: #1B1B1B; margin: 0; padding: 32px 20px; }
+  .box { max-width: 480px; margin: 40px auto; text-align: center; }
+  h1 { font-size: 1.4rem; }
+  p { color: #44464A; line-height: 1.5; }
+  button { margin-top: 16px; padding: 10px 24px; border-radius: 100px; border: none; background: #2E5AAC; color: #fff; font-size: 1rem; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>Немає з'єднання з мережею</h1>
+    <p>
+      Статус території завжди показує дату актуальності разом з висновком,
+      тому застосунок не показує застарілі дані без мережі — щойно
+      з'єднання відновиться, оновіть сторінку.
+    </p>
+    <button onclick="location.reload()">Спробувати ще раз</button>
+  </div>
+</body>
+</html>
