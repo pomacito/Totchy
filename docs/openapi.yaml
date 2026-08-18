@@ -1,0 +1,484 @@
+openapi: 3.1.0
+info:
+  title: Статус території — публічне API
+  version: 0.1.0
+  description: >
+    Інформаційно-аналітичне API для визначення офіційного правового статусу
+    населених пунктів і територіальних громад України. Це MVP: набір даних за
+    замовчуванням демонстраційний (isDemoData=true) — див. /docs/KNOWN_LIMITATIONS.md.
+    Кожна відповідь про статус містить нормативну підставу, редакцію джерела
+    та дату актуальності даних.
+servers:
+  - url: /api
+paths:
+  /search:
+    get:
+      summary: Розумний пошук населених пунктів і громад
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 200 }
+        - name: region
+          in: query
+          schema: { type: string }
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [AR_CRIMEA, OBLAST, RAION, HROMADA, CITY, TOWN, VILLAGE, URBAN_SETTLEMENT, CITY_DISTRICT]
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50 }
+      responses:
+        "200":
+          description: Результати пошуку, з ознакою потреби в disambiguation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SearchResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /territories/{katottg}:
+    get:
+      summary: Базова інформація про об'єкт за кодом КАТОТТГ
+      parameters:
+        - $ref: "#/components/parameters/Katottg"
+      responses:
+        "200":
+          description: Об'єкт знайдено
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TerritoryInfo" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /territories/{katottg}/status:
+    get:
+      summary: Правовий статус об'єкта станом на дату
+      parameters:
+        - $ref: "#/components/parameters/Katottg"
+        - name: asOf
+          in: query
+          description: Дата у форматі YYYY-MM-DD. За замовчуванням — поточна дата.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: >
+            Результат визначення статусу. Поле `outcome` — один із
+            UNIT_NOT_FOUND | NO_REDACTION_FOR_DATE | FOUND_NO_RECORD |
+            NEEDS_REVIEW | FOUND_STATUS (див. docs/RULES_ENGINE.md).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/StatusResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /territories/{katottg}/timeline:
+    get:
+      summary: Повна хронологія записів статусу об'єкта та його предків
+      parameters:
+        - $ref: "#/components/parameters/Katottg"
+      responses:
+        "200":
+          description: Хронологія, найновіші записи спочатку
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TimelineResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /compare:
+    post:
+      summary: Порівняння статусу до 10 об'єктів на одну дату
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [katottgCodes]
+              properties:
+                katottgCodes:
+                  type: array
+                  minItems: 2
+                  maxItems: 10
+                  items: { type: string }
+                asOfDate: { type: string, format: date }
+      responses:
+        "200":
+          description: Результат для кожного запитаного об'єкта
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompareResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /analytics/summary:
+    get:
+      summary: Агрегована аналітика станом на дату
+      parameters:
+        - name: asOf
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Аналітичний зріз
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsSummary" }
+
+  /legal-acts:
+    get:
+      summary: Реєстр нормативних актів
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Список актів із пагінацією
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LegalActsResponse" }
+
+  /source-versions:
+    get:
+      summary: Опубліковані редакції джерела
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: Список редакцій із пагінацією
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceVersionsResponse" }
+
+  /reports:
+    post:
+      summary: Сформувати звіт (синхронно для MVP)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, format, params]
+              properties:
+                type:
+                  type: string
+                  enum: [SINGLE_TERRITORY, COMPARISON, REGIONAL, VERSION_DIFF, ANALYTICS_PERIOD, UPDATE_LOG]
+                format:
+                  type: string
+                  enum: [PDF, XLSX, CSV, HTML]
+                params:
+                  type: object
+                  description: Параметри, специфічні для типу звіту (напр. katottg, asOfDate).
+      responses:
+        "201":
+          description: Звіт сформовано
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportJob" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /reports/{id}:
+    get:
+      summary: Статус і посилання на завантаження звіту
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Стан завдання формування звіту
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportJob" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /reports/{id}/file:
+    get:
+      summary: Завантажити готовий файл звіту
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Бінарний вміст звіту (PDF або CSV)
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+            text/csv: { schema: { type: string, format: binary } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /reports/verify/{token}:
+    get:
+      summary: Перевірка автентичності звіту за стабільним токеном
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Звіт дійсний
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  parameters:
+    Katottg:
+      name: katottg
+      in: path
+      required: true
+      schema: { type: string }
+      description: Код КАТОТТГ об'єкта.
+
+  responses:
+    ValidationError:
+      description: Помилка валідації вхідних параметрів
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    NotFound:
+      description: Об'єкт не знайдено
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+    RateLimited:
+      description: Перевищено ліміт запитів
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApiError" }
+
+  schemas:
+    ApiError:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string }
+
+    SearchResponse:
+      type: object
+      properties:
+        query: { type: string }
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              katottg: { type: string }
+              name: { type: string }
+              type: { type: string }
+              matchedName: { type: string }
+              score: { type: number }
+              isDemoData: { type: boolean }
+              administrativePath:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    katottg: { type: string }
+                    name: { type: string }
+                    type: { type: string }
+        requiresDisambiguation: { type: boolean }
+        ambiguousNames:
+          type: array
+          items: { type: string }
+
+    TerritoryInfo:
+      type: object
+      properties:
+        unit:
+          type: object
+          properties:
+            katottg: { type: string }
+            name: { type: string }
+            type: { type: string }
+            isDemoData: { type: boolean }
+            validFrom: { type: string, format: date-time }
+            validTo: { type: string, format: date-time, nullable: true }
+        administrativePath:
+          type: array
+          items:
+            type: object
+            properties:
+              katottg: { type: string }
+              name: { type: string }
+              type: { type: string }
+
+    StatusResult:
+      type: object
+      description: >
+        Форма відповіді залежить від `outcome`. Для FOUND_STATUS присутні
+        поля `status`, `legalBasis`, `evidenceChain`, `confidence`. Для
+        інших outcome — підмножина полів плюс `explanation`.
+      properties:
+        outcome:
+          type: string
+          enum: [UNIT_NOT_FOUND, NO_REDACTION_FOR_DATE, FOUND_NO_RECORD, NEEDS_REVIEW, FOUND_STATUS]
+        asOfDate: { type: string, format: date-time }
+        matchedUnit:
+          type: object
+          properties:
+            katottg: { type: string }
+            name: { type: string }
+            type: { type: string }
+            isDemoData: { type: boolean }
+        administrativePath:
+          type: array
+          items: { type: object }
+        status:
+          type: object
+          properties:
+            categoryCode: { type: string }
+            officialLabel: { type: string }
+            shortLabel: { type: string }
+            startDate: { type: string, format: date-time }
+            endDate: { type: string, format: date-time, nullable: true }
+            isActiveOnDate: { type: boolean }
+            recordLevel: { type: string }
+            appliesVia: { type: string, enum: [DIRECT, INHERITED] }
+        legalBasis:
+          type: array
+          items:
+            type: object
+            properties:
+              actTitle: { type: string }
+              actNumber: { type: string }
+              actDate: { type: string, format: date-time }
+              effectiveDate: { type: string, format: date-time }
+              officialUrl: { type: string }
+              sourceVersion: { type: string }
+        evidenceChain:
+          type: array
+          items:
+            type: object
+            properties:
+              step: { type: string }
+              label: { type: string }
+              value: { type: string }
+        explanation: { type: string }
+        dataUpdatedAt: { type: string, format: date-time, nullable: true }
+        confidence:
+          type: string
+          enum: [verified, demo_data, needs_review]
+          description: Стосується якості ідентифікації/валідації даних, НЕ ймовірності статусу.
+
+    TimelineResponse:
+      type: object
+      properties:
+        katottg: { type: string }
+        name: { type: string }
+        timeline:
+          type: array
+          items:
+            type: object
+            properties:
+              categoryCode: { type: string }
+              officialLabel: { type: string }
+              startDate: { type: string, format: date-time }
+              endDate: { type: string, format: date-time, nullable: true }
+              recordLevel: { type: string }
+              sourceVersion: { type: string }
+              isDemoData: { type: boolean }
+              needsReview: { type: boolean }
+
+    CompareResponse:
+      type: object
+      properties:
+        asOfDate: { type: string, format: date-time }
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/StatusResult" }
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        asOfDate: { type: string, format: date-time }
+        totalUnitsConsidered: { type: integer }
+        byCategory:
+          type: array
+          items:
+            type: object
+            properties:
+              categoryCode: { type: string }
+              label: { type: string }
+              count: { type: integer }
+        byOblast:
+          type: array
+          items:
+            type: object
+            properties:
+              oblastName: { type: string }
+              total: { type: integer }
+        withoutEndDate: { type: integer }
+        withEndDate: { type: integer }
+        needsReviewCount: { type: integer }
+        noRecordCount: { type: integer }
+        dataQuality:
+          type: object
+          properties:
+            validationIssuesOpen: { type: integer }
+            validationIssuesResolved: { type: integer }
+
+    LegalActsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              type: { type: string }
+              issuingBody: { type: string }
+              number: { type: string }
+              title: { type: string }
+              adoptedAt: { type: string, format: date-time }
+              effectiveAt: { type: string, format: date-time }
+              officialUrl: { type: string }
+              status: { type: string }
+        pagination:
+          type: object
+          properties:
+            limit: { type: integer }
+            offset: { type: integer }
+            total: { type: integer }
+
+    SourceVersionsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              label: { type: string }
+              publishedAt: { type: string, format: date-time, nullable: true }
+              isDemoData: { type: boolean }
+        pagination:
+          type: object
+          properties:
+            limit: { type: integer }
+            offset: { type: integer }
+            total: { type: integer }
+
+    ReportJob:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [QUEUED, PROCESSING, READY, FAILED] }
+        type: { type: string }
+        format: { type: string }
+        downloadUrl: { type: string, nullable: true }
+        verifyUrl: { type: string }

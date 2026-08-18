@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: status_terytorii
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/status_terytorii?schema=public
+      APP_SESSION_SECRET: ci-only-secret-not-for-production-use-0123456789abcdef
+      APP_BASE_URL: http://localhost:3000
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_DIR: ./.storage
+      DEMO_DATA_MODE: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Enable required Postgres extensions
+        run: |
+          PGPASSWORD=postgres psql -h localhost -U postgres -d status_terytorii -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+          PGPASSWORD=postgres psql -h localhost -U postgres -d status_terytorii -c "CREATE EXTENSION IF NOT EXISTS unaccent;"
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Apply migrations (migration check)
+        run: npm run prisma:deploy
+
+      - name: Seed demo data (required for integration tests)
+        run: npm run db:seed
+
+      - name: Unit + integration tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
